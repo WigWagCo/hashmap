@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -15,7 +16,7 @@ type Animal struct {
 func TestMapCreation(t *testing.T) {
 	m := &HashMap{}
 	if m.Len() != 0 {
-		t.Error("new map should be empty.")
+		t.Errorf("new map should be empty but has %d items.", m.Len())
 	}
 }
 
@@ -29,7 +30,7 @@ func TestOverwrite(t *testing.T) {
 	m.Set(1, unsafe.Pointer(&monkey))
 
 	if m.Len() != 1 {
-		t.Error("map should contain exactly one element.")
+		t.Errorf("map should contain exactly one element but has %v items.", m.Len())
 	}
 
 	tmp, ok := m.Get(1) // Retrieve inserted element.
@@ -45,12 +46,20 @@ func TestOverwrite(t *testing.T) {
 
 func TestInsert(t *testing.T) {
 	m := &HashMap{}
-	c := uint64(16)
-	ok := m.Insert(uint64(128), unsafe.Pointer(&c))
+	_, ok := m.GetUintKey(0)
+	if ok {
+		t.Error("empty map should not return an item.")
+	}
+	c := uintptr(16)
+	ok = m.Insert(uintptr(0), unsafe.Pointer(&c))
 	if !ok {
 		t.Error("insert did not succeed.")
 	}
-	ok = m.Insert(uint64(128), unsafe.Pointer(&c))
+	ok = m.Insert(uintptr(128), unsafe.Pointer(&c))
+	if !ok {
+		t.Error("insert did not succeed.")
+	}
+	ok = m.Insert(uintptr(128), unsafe.Pointer(&c))
 	if ok {
 		t.Error("insert on existing item did succeed.")
 	}
@@ -58,8 +67,12 @@ func TestInsert(t *testing.T) {
 	if !ok {
 		t.Error("ok should be true for item stored within the map.")
 	}
-	if m.Len() != 1 {
-		t.Error("map should contain exactly 1 element.")
+	_, ok = m.GetUintKey(127)
+	if ok {
+		t.Error("item for key should not exist.")
+	}
+	if m.Len() != 2 {
+		t.Errorf("map should contain exactly 2 elements but has %v items.", m.Len())
 	}
 }
 
@@ -108,24 +121,48 @@ func TestGet(t *testing.T) {
 	}
 }
 
+func TestGrow(t *testing.T) {
+	m := &HashMap{}
+	m.Grow(uintptr(63))
+
+	for { // make sure to wait for resize operation to finish
+		if atomic.LoadUintptr(&m.resizing) == 0 {
+			break
+		}
+		time.Sleep(time.Microsecond * 50)
+	}
+
+	d := m.mapData()
+	if d.keyshifts != 58 {
+		t.Error("Grow operation did not result in correct internal map data structure.")
+	}
+}
+
 func TestResize(t *testing.T) {
 	m := New(2)
 	itemCount := 50
 
 	for i := 0; i < itemCount; i++ {
-		m.Set(uint64(i), unsafe.Pointer(&Animal{strconv.Itoa(i)}))
+		m.Set(uintptr(i), unsafe.Pointer(&Animal{strconv.Itoa(i)}))
 	}
 
-	if m.Len() != uint64(itemCount) {
+	if m.Len() != itemCount {
 		t.Error("Expected element count did not match.")
 	}
 
-	if m.Fillrate() < 30 {
-		t.Error("Expecting >= 30 percent fillrate.")
+	for { // make sure to wait for resize operation to finish
+		if atomic.LoadUintptr(&m.resizing) == 0 {
+			break
+		}
+		time.Sleep(time.Microsecond * 50)
+	}
+
+	if m.Fillrate() != 34 {
+		t.Error("Expecting 34 percent fillrate.")
 	}
 
 	for i := 0; i < itemCount; i++ {
-		_, ok := m.Get(uint64(i))
+		_, ok := m.Get(uintptr(i))
 		if !ok {
 			t.Error("Getting inserted item failed.")
 		}
@@ -144,13 +181,15 @@ func TestStringer(t *testing.T) {
 
 	m.Set(0, unsafe.Pointer(elephant))
 	s = m.String()
-	if s != "[9257401834698437112]" {
+	hashedKey0 := getKeyHash(0)
+	if s != fmt.Sprintf("[%v]", hashedKey0) {
 		t.Error("1 item map as string does not match:", s)
 	}
 
 	m.Set(1, unsafe.Pointer(monkey))
 	s = m.String()
-	if s != "[1754102016959854353,9257401834698437112]" {
+	hashedKey1 := getKeyHash(1)
+	if s != fmt.Sprintf("[%v,%v]", hashedKey1, hashedKey0) {
 		t.Error("2 item map as string does not match:", s)
 	}
 }
@@ -189,10 +228,14 @@ func TestDelete(t *testing.T) {
 
 func TestIterator(t *testing.T) {
 	m := &HashMap{}
-	itemCount := 16
 
+	for item := range m.Iter() {
+		t.Errorf("Expected no object but got %v.", item)
+	}
+
+	itemCount := 16
 	for i := itemCount; i > 0; i-- {
-		m.Set(uint64(i), unsafe.Pointer(&Animal{strconv.Itoa(i)}))
+		m.Set(uintptr(i), unsafe.Pointer(&Animal{strconv.Itoa(i)}))
 	}
 
 	counter := 0
@@ -211,29 +254,40 @@ func TestIterator(t *testing.T) {
 
 func TestHashedKey(t *testing.T) {
 	m := &HashMap{}
+	_, ok := m.GetHashedKey(uintptr(0))
+	if ok {
+		t.Error("empty map should not return an item.")
+	}
+	m.DelHashedKey(uintptr(0))
+	m.allocate(uintptr(64))
+	m.DelHashedKey(uintptr(0))
+
 	itemCount := 16
-	log := log2(uint64(itemCount))
+	log := log2(uintptr(itemCount))
 
 	for i := 0; i < itemCount; i++ {
-		m.SetHashedKey(uint64(i)<<(64-log), unsafe.Pointer(&Animal{strconv.Itoa(i)}))
+		m.SetHashedKey(uintptr(i)<<(strconv.IntSize-log), unsafe.Pointer(&Animal{strconv.Itoa(i)}))
 	}
 
-	if m.Len() != uint64(itemCount) {
+	if m.Len() != itemCount {
 		t.Error("Expected element count did not match.")
 	}
 
 	for i := 0; i < itemCount; i++ {
-		_, ok := m.GetHashedKey(uint64(i) << (64 - log))
+		_, ok = m.GetHashedKey(uintptr(i) << (strconv.IntSize - log))
 		if !ok {
 			t.Error("Getting inserted item failed.")
 		}
 	}
 
 	for i := 0; i < itemCount; i++ {
-		m.DelHashedKey(uint64(i) << (64 - log))
+		m.DelHashedKey(uintptr(i) << (strconv.IntSize - log))
 	}
-
-	if m.Len() != uint64(0) {
+	_, ok = m.GetHashedKey(uintptr(0))
+	if ok {
+		t.Error("item for key should not exist.")
+	}
+	if m.Len() != 0 {
 		t.Error("Map is not empty.")
 	}
 }
@@ -243,17 +297,17 @@ func TestCompareAndSwapHashedKey(t *testing.T) {
 	elephant := &Animal{"elephant"}
 	monkey := &Animal{"monkey"}
 
-	m.SetHashedKey(1<<62, unsafe.Pointer(elephant))
+	m.SetHashedKey(1<<(strconv.IntSize-2), unsafe.Pointer(elephant))
 	if m.Len() != 1 {
 		t.Error("map should contain exactly one element.")
 	}
-	if !m.CasHashedKey(1<<62, unsafe.Pointer(elephant), unsafe.Pointer(monkey)) {
+	if !m.CasHashedKey(1<<(strconv.IntSize-2), unsafe.Pointer(elephant), unsafe.Pointer(monkey)) {
 		t.Error("Cas should success if expectation met")
 	}
-	if m.CasHashedKey(1<<62, unsafe.Pointer(elephant), unsafe.Pointer(monkey)) {
+	if m.CasHashedKey(1<<(strconv.IntSize-2), unsafe.Pointer(elephant), unsafe.Pointer(monkey)) {
 		t.Error("Cas should fail if expectation didn't meet")
 	}
-	tmp, ok := m.GetHashedKey(1 << 62)
+	tmp, ok := m.GetHashedKey(1 << (strconv.IntSize - 2))
 	if !ok {
 		t.Error("ok should be true for item stored within the map.")
 	}
@@ -265,6 +319,11 @@ func TestCompareAndSwapHashedKey(t *testing.T) {
 
 func TestCompareAndSwap(t *testing.T) {
 	m := &HashMap{}
+	ok := m.CasHashedKey(uintptr(0), nil, nil)
+	if ok {
+		t.Error("empty map should not return an item.")
+	}
+
 	elephant := &Animal{"elephant"}
 	monkey := &Animal{"monkey"}
 
@@ -298,22 +357,22 @@ func TestAPICounter(t *testing.T) {
 		for {
 			val, ok := m.GetStringKey(s)
 			if !ok { // item does not exist yet
-				c := int64(1)
+				c := uintptr(1)
 				if !m.Insert(s, unsafe.Pointer(&c)) {
 					continue // item was inserted concurrently, try to read it again
 				}
 				break
 			}
 
-			c := (*int64)(val)
-			atomic.AddInt64(c, 1)
+			c := (*uintptr)(val)
+			atomic.AddUintptr(c, 1)
 			break
 		}
 	}
 
 	s := fmt.Sprintf("/api%d/", 0)
 	val, _ := m.GetStringKey(s)
-	c := (*int64)(val)
+	c := (*uintptr)(val)
 	if *c != 25 {
 		t.Error("wrong API call count.")
 	}
@@ -338,25 +397,25 @@ func TestExample(t *testing.T) {
 func TestGetOrInsert(t *testing.T) {
 	m := &HashMap{}
 
-	var i, j int64
+	var i, j uintptr
 	actual, loaded := m.GetOrInsert("api1", unsafe.Pointer(&i))
 	if loaded {
 		t.Error("item should have been inserted.")
 	}
 
-	counter := (*int64)(actual)
+	counter := (*uintptr)(actual)
 	if *counter != 0 {
 		t.Error("item should be 0.")
 	}
 
-	atomic.AddInt64(counter, 1) // increase counter
+	atomic.AddUintptr(counter, 1) // increase counter
 
 	actual, loaded = m.GetOrInsert("api1", unsafe.Pointer(&j))
 	if !loaded {
 		t.Error("item should have been loaded.")
 	}
 
-	counter = (*int64)(actual)
+	counter = (*uintptr)(actual)
 	if *counter != 1 {
 		t.Error("item should be 1.")
 	}
