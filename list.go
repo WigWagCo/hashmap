@@ -5,93 +5,85 @@ import (
 	"unsafe"
 )
 
-// List is a sorted list.
+// List is a sorted doubly linked list.
 type List struct {
-	count uint64
+	count uintptr
 	root  *ListElement
 }
 
 // NewList returns an initialized list.
 func NewList() *List {
-	e := &ListElement{deleted: 1}
-	e.nextElement = unsafe.Pointer(e) // mark as root by pointing to itself
-
-	return &List{root: e}
+	return &List{root: &ListElement{}}
 }
 
 // Len returns the number of elements within the list.
-func (l *List) Len() uint64 {
-	return atomic.LoadUint64(&l.count)
+func (l *List) Len() int {
+	if l == nil {
+		return 0
+	}
+
+	return int(atomic.LoadUintptr(&l.count))
 }
 
 // First returns the first item of the list.
 func (l *List) First() *ListElement {
-	item := l.root.Next()
-	if item != l.root {
-		return item
-	}
-	return nil
+	return l.root.Next()
 }
 
 // Add adds an item to the list and returns false if an item for the hash existed.
-func (l *List) Add(newElement *ListElement, searchStart *ListElement) (existed bool, inserted bool) {
-	if searchStart == nil || newElement.keyHash < searchStart.keyHash { // key needs to be inserted on the left? {
-		searchStart = l.root
+func (l *List) Add(element *ListElement, searchStart *ListElement) (existed bool, inserted bool) {
+	if searchStart == nil || element.keyHash < searchStart.keyHash { // key needs to be inserted on the left? {
+		searchStart = nil // start search at root
 	}
 
-	left, found, right := l.search(searchStart, newElement)
+	left, found, right := l.search(searchStart, element)
 	if found != nil { // existing item found
 		return true, false
 	}
 
-	return false, l.insertAt(newElement, left, right)
+	return false, l.insertAt(element, left, right)
 }
 
 // AddOrUpdate adds or updates an item to the list.
-func (l *List) AddOrUpdate(newElement *ListElement, searchStart *ListElement) bool {
-	if searchStart == nil || newElement.keyHash < searchStart.keyHash { // key needs to be inserted on the left? {
-		searchStart = l.root
+func (l *List) AddOrUpdate(element *ListElement, searchStart *ListElement) bool {
+	if searchStart == nil || element.keyHash < searchStart.keyHash { // key needs to be inserted on the left? {
+		searchStart = nil // start search at root
 	}
 
-	left, found, right := l.search(searchStart, newElement)
+	left, found, right := l.search(searchStart, element)
 	if found != nil { // existing item found
-		found.SetValue(newElement.value) // update the value
-		if found.SetDeleted(false) {     // try to mark from deleted to not deleted
-			atomic.AddUint64(&l.count, 1)
-		}
+		found.SetValue(element.value) // update the value
 		return true
 	}
 
-	return l.insertAt(newElement, left, right)
+	return l.insertAt(element, left, right)
 }
 
-// Cas compares and swaps the values and add an item to the list.
-func (l *List) Cas(newElement *ListElement, oldValue unsafe.Pointer, searchStart *ListElement) bool {
-	if searchStart == nil || newElement.keyHash < searchStart.keyHash { // key needs to be inserted on the left? {
-		searchStart = l.root
+// Cas compares and swaps the value of an item in the list.
+func (l *List) Cas(element *ListElement, oldValue unsafe.Pointer, searchStart *ListElement) bool {
+	if searchStart == nil || element.keyHash < searchStart.keyHash { // key needs to be inserted on the left? {
+		searchStart = nil // start search at root
 	}
 
-	_, found, _ := l.search(searchStart, newElement)
+	_, found, _ := l.search(searchStart, element)
 	if found == nil { // no existing item found
 		return false
 	}
 
-	if found.CasValue(oldValue, newElement.value) {
-		if found.SetDeleted(false) { // try to mark from deleted to not deleted
-			atomic.AddUint64(&l.count, 1)
-		}
+	if found.CasValue(oldValue, element.value) {
+		atomic.AddUintptr(&l.count, 1)
 		return true
 	}
 	return false
 }
 
 func (l *List) search(searchStart *ListElement, item *ListElement) (left *ListElement, found *ListElement, right *ListElement) {
-	if searchStart == l.root {
-		found = searchStart.Next()
-		if found == l.root { // no items beside root?
+	if searchStart == nil { // start search at root?
+		left = l.root
+		found = left.Next()
+		if found == nil { // no items beside root?
 			return nil, nil, nil
 		}
-		left = searchStart
 	} else {
 		found = searchStart
 	}
@@ -105,7 +97,7 @@ func (l *List) search(searchStart *ListElement, item *ListElement) (left *ListEl
 			return left, nil, found
 		}
 
-		// go to next entry in sorted linked list
+		// go to next element in sorted linked list
 		left = found
 		found = left.Next()
 		if found == nil { // no more items on the right
@@ -114,27 +106,35 @@ func (l *List) search(searchStart *ListElement, item *ListElement) (left *ListEl
 	}
 }
 
-func (l *List) insertAt(newElement *ListElement, left *ListElement, right *ListElement) bool {
+func (l *List) insertAt(element *ListElement, left *ListElement, right *ListElement) bool {
 	if left == nil { // insert at root
-		if !atomic.CompareAndSwapPointer(&l.root.nextElement, unsafe.Pointer(l.root), unsafe.Pointer(newElement)) {
+		if !atomic.CompareAndSwapPointer(&l.root.nextElement, unsafe.Pointer(nil), unsafe.Pointer(element)) {
 			return false // item was modified concurrently
 		}
 	} else {
-		newElement.nextElement = unsafe.Pointer(right)
-		if !atomic.CompareAndSwapPointer(&left.nextElement, unsafe.Pointer(right), unsafe.Pointer(newElement)) {
+		element.previousElement = unsafe.Pointer(left)
+		element.nextElement = unsafe.Pointer(right)
+		if !atomic.CompareAndSwapPointer(&left.nextElement, unsafe.Pointer(right), unsafe.Pointer(element)) {
 			return false // item was modified concurrently
 		}
 	}
 
-	atomic.AddUint64(&l.count, 1)
+	atomic.AddUintptr(&l.count, 1)
 	return true
 }
 
 // Delete marks the list element as deleted.
 func (l *List) Delete(element *ListElement) {
-	if !element.SetDeleted(true) {
-		return // element was already deleted
+	for {
+		left := element.Previous()
+		right := element.Next()
+		if left != nil {
+			if !atomic.CompareAndSwapPointer(&left.nextElement, unsafe.Pointer(element), unsafe.Pointer(right)) {
+				continue // item was modified concurrently
+			}
+		}
+		break
 	}
 
-	atomic.AddUint64(&l.count, ^uint64(0)) // decrease counter
+	atomic.AddUintptr(&l.count, ^uintptr(0)) // decrease counter
 }
