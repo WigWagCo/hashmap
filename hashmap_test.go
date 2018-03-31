@@ -13,6 +13,11 @@ type Animal struct {
 	name string
 }
 
+type CountingAnimal struct {
+	name string
+	cnt  int
+}
+
 func TestMapCreation(t *testing.T) {
 	m := &HashMap{}
 	if m.Len() != 0 {
@@ -194,6 +199,99 @@ func TestStringer(t *testing.T) {
 	}
 }
 
+func TestIterOngoingDel(t *testing.T) {
+	m := &HashMap{}
+	elephant := &CountingAnimal{"elephant", 1}
+	monkey := &CountingAnimal{"monkey", 0}
+	m.Set("one", unsafe.Pointer(elephant))
+	m.Set("two", unsafe.Pointer(monkey))
+
+	iterRunner := func() {
+		for item := range m.Iter() {
+			v := (*CountingAnimal)(item.Value)
+			v.cnt++
+			m.Del("one")
+		}
+	}
+
+	go iterRunner()
+
+	time.Sleep(500 * time.Millisecond)
+
+	m.Del("two")
+	//	m.Del("one")
+
+	val, ok := m.GetStringKey("one") // Get a missing element.
+	if ok {
+		t.Error("ok should be false when item is missing from map.")
+	}
+	if val != nil {
+		t.Error("Missing values should return as nil.")
+	}
+
+	val, ok = m.GetStringKey("two") // Get a missing element.
+	if ok {
+		t.Error("ok should be false when item is missing from map.")
+	}
+	if val != nil {
+		t.Error("Missing values should return as nil.")
+	}
+
+}
+
+func TestDeleteOne(t *testing.T) {
+	m := &HashMap{}
+	elephant := &Animal{"elephant"}
+	monkey := &Animal{"monkey"}
+	m.Set("one", unsafe.Pointer(elephant))
+	m.Set("two", unsafe.Pointer(monkey))
+
+	val, ok := m.GetStringKey("one") // Get a missing element.
+	if !ok {
+		t.Error("ok should be true here.")
+	}
+	m.Del("huh")
+	if m.Len() != 2 {
+		t.Error("map should contain exactly two elements.")
+	}
+
+	val, ok = m.GetStringKey("one") // Get a missing element.
+	if !ok {
+		t.Error("ok should be true.")
+	}
+
+	for item := range m.Iter() {
+		_ = item
+		fmt.Printf("<< %+v ", item)
+		m.Del("one")
+	}
+	fmt.Printf("\n")
+	//	m.Del("one")
+
+	val, ok = m.GetStringKey("two") // Get a missing element.
+	if !ok {
+		t.Error("ok should be true.")
+	}
+
+	m.Del("two")
+
+	for item := range m.Iter() {
+		_ = item
+		fmt.Printf(">> %+v ", item)
+		//		t.Errorf("map should be empty but got %v in the iterator. 2", item)
+
+	}
+
+	val, ok = m.GetStringKey("one") // Get a missing element.
+	if ok {
+		t.Error("ok should be false when item is missing from map.")
+	}
+	if val != nil {
+		t.Error("Missing values should return as nil.")
+	}
+
+}
+
 func TestDelete(t *testing.T) {
 	m := &HashMap{}
 	m.Del(0)
@@ -213,6 +311,10 @@ func TestDelete(t *testing.T) {
 	m.Del(2)
 	if m.Len() != 0 {
 		t.Error("map should be empty.")
+	}
+
+	for item := range m.Iter() {
+		t.Errorf("map should be empty but got %v in the iterator.", item)
 	}
 
 	val, ok := m.Get(1) // Get a missing element.
